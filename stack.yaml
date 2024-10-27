@@ -1,0 +1,719 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Serverless private URL shortener based on Amazon S3, AWS Lambda, Amazon CloudFront and API Gateway.
+
+Outputs:
+  BucketName:
+    Description: "Amazon S3 bucket name holding short URLs redirect objects. Note: the bucket will not be deleted when you delete this template."
+    Value: !Ref S3BucketForURLs
+  ConnectURL:
+    Description: URL to connect to the admin page of the URL Shortener.
+    Value: !Sub "https://${CloudFrontDistrib.DomainName}/admin/"
+
+Resources:
+
+  ######################################################################
+  #
+  # Amazon S3 bucket to store the HTML form and the redirection objects
+  #   the 'u' folder is used for redirect objects and is public
+  #
+  ######################################################################
+  S3BucketForURLs:
+    Type: "AWS::S3::Bucket"
+    DependsOn: S3InvokeLambdaPermission
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-urlshortener-bucket"
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Function: !GetAtt LambdaObjCountdown.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: 'prefix'
+                    Value: 'u/'
+      WebsiteConfiguration:
+        IndexDocument: "index.html"
+  S3InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref LambdaObjCountdown
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::${AWS::StackName}-urlshortener-bucket"
+  ######################################################################
+  #
+  # DynamoDBForObj to store short URLs object access times
+  #
+  ######################################################################
+  DynamoDBForObj:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: 'S3ObjectAccessTimes'
+      AttributeDefinitions:
+        - AttributeName: 'ObjectKey'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'ObjectKey'
+          KeyType: 'HASH'
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  ######################################################################
+  #
+  # Lambda function for the URL Shortener
+  #
+  ######################################################################
+  LambdaShortener:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: index.handler
+      MemorySize: 384
+      Role: !GetAtt LambdaExecRole.Arn
+      Runtime: python3.9
+      Timeout: 10
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref S3BucketForURLs
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import random
+          import string
+          import botocore
+          from botocore.client import Config
+
+          AWS_REGION = os.environ['AWS_REGION']
+
+          DEBUG = True
+
+          # generate a random string of n characters, lowercase and numbers
+          def generate_random(n):
+            return ''.join(random.SystemRandom().choice(string.ascii_lowercase + string.digits) for _ in range(n))
+
+          #check if custom url suffix inputted
+          def exist_url_suffix(e):
+            if e.get("custom_url") != None:
+              return 1
+            else:
+              return 0 
+
+          # checks whether an object already exists in the Amazon S3 bucket
+          # we do a head_object, if it throws a 404 error then the object does not exist
+          def exists_s3_key(s3_client, bucket, key):
+            try:
+              resp = s3_client.head_object(Bucket=bucket, Key=key)
+              return True
+            except botocore.exceptions.ClientError as e:
+              # if ListBucket access is granted, then missing file returns 404
+              if (e.response['Error']['Code'] == "404"): return False
+              # if ListBucket access is not granted, then missing file returns 403
+              if (e.response['Error']['Code'] == "403"): return False
+              print(e.response)
+              raise e     # otherwise re-raise the exception
+
+          def handler(event, context):
+            print(event)
+            BUCKET_NAME = os.environ['S3_BUCKET']   # from env variable
+
+            native_url = event.get("url_long")
+            cdn_prefix = event.get("cdn_prefix")
+            
+
+            ### Generate a short id for the redirect
+            # check if short_key object already exists - collision could occur
+            s3 = boto3.client('s3', config=Config(signature_version='s3v4'))
+
+            while (True):
+              if exist_url_suffix(event):
+                short_id = event.get("custom_url")
+              else:
+                short_id = generate_random(5)
+              short_key = "u/" + short_id
+              
+              if not(exists_s3_key(s3, BUCKET_NAME, short_key)):
+                break
+              else:
+                ### return custom url suffix collsion
+                if exist_url_suffix(event):
+                  return {
+                          "error": "Custom URL suffix already exists. Please choose a different one."
+                        }
+                else:
+                  print("We got a short_key collision: " + short_key + ". Retrying.")
+
+            print("We got a valid short_key: " + short_key)
+
+            ### Third step: create the redirection object in the S3 bucket
+            resp = s3.put_object(Bucket=BUCKET_NAME,
+                                Key=short_key,
+                                Body=b"",
+                                WebsiteRedirectLocation=native_url,
+                                ContentType="text/plain")
+
+            public_short_url = "https://" + cdn_prefix + "/" + short_id;
+
+            return { "url_short": public_short_url, "url_long": native_url }
+
+  ######################################################################
+  #
+  # Lambda function for the URL Redirection
+  #
+  ######################################################################
+  LambdaRedirector:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: index.handler
+      MemorySize: 384
+      Role: !GetAtt LambdaExecRole.Arn
+      Runtime: python3.9
+      Timeout: 5
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref S3BucketForURLs
+          LAMBDA_COUNTDOWN: !Ref LambdaObjCountdown
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          import json
+          from botocore.client import Config
+
+          S3_BUCKET = os.environ['S3_BUCKET']
+
+
+          def handler(event, context):
+            print(event)
+            short_url = "u/" + event.get("Key")
+            s3 = boto3.client('s3', config=Config(signature_version='s3v4'))
+
+            resp = s3.head_object(Bucket=S3_BUCKET, Key=short_url)
+
+            #invoke countdown lambda to restart url expiration countdown
+            client = boto3.client('lambda')
+
+            payload = {
+              "Records":[
+                  {
+                    "s3":{
+                        "bucket":{
+                          "name":S3_BUCKET,
+                        },
+                        "object":{
+                          "key":short_url
+                        }
+                    }
+                  }
+              ]
+            }
+            response = client.invoke(
+              FunctionName= os.environ['LAMBDA_COUNTDOWN'],
+              InvocationType="Event",
+              Payload=json.dumps(payload)
+            )
+            
+            print(resp)
+            redirect_url = resp.get('WebsiteRedirectLocation')
+            if redirect_url:
+              print("Redirect: " + redirect_url)
+              return { "Redirect": redirect_url }
+            else:
+              return { "Error": "Unable to load redirect url for object: s3://" + S3_BUCKET + "/" + short_url }
+
+
+  LambdaExecRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        -
+          PolicyName: LambdaExecRoleUrlShortener
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action: [ "s3:GetObject", "s3:PutObject" ]
+                Resource: !Sub "arn:aws:s3:::${S3BucketForURLs}/u/*"
+              -
+                Effect: Allow
+                Action: ["lambda:InvokeFunction"]
+                Resource: !GetAtt LambdaObjCountdown.Arn
+
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: ""
+            Effect: Allow
+            Principal:
+              Service: "lambda.amazonaws.com"
+            Action: "sts:AssumeRole"
+
+  ######################################################################
+  #
+  # Lambda function for the short URL S3 objects deletion
+  #
+  ######################################################################
+  LambdaObjDeleteExecRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'LambdaS3DynamoDBPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:DeleteObject'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'events:PutRule'
+                  - 'events:PutTargets'
+                  - 'events:DeleteRule'
+                  - 'events:RemoveTargets'
+                  - 'events:DescribeRule'
+                Resource: '*'
+
+  LambdaObjCountdown:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.handler
+      MemorySize: 384
+      Role: !GetAtt LambdaObjDeleteExecRole.Arn
+      Runtime: 'python3.9'
+      Timeout: 5
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref DynamoDBForObj
+          LAMBDA_ARN: !GetAtt LambdaObjDelete.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import json
+          from datetime import datetime, timedelta
+
+          dynamodb = boto3.resource('dynamodb')
+          s3 = boto3.client('s3')
+          table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
+
+          def handler(event, context):
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              key = event['Records'][0]['s3']['object']['key']
+              
+              # Update the last access time in DynamoDB
+              current_time = datetime.utcnow()
+              table.put_item(
+                  Item={
+                      'ObjectKey': key,
+                      'LastAccessTime': current_time.isoformat()
+                  }
+              )
+              
+              # Schedule deletion 10 minutes after the last access time
+              delete_time = current_time + timedelta(minutes=10)
+              schedule_deletion(bucket, key, delete_time)
+
+          def schedule_deletion(bucket, key, delete_time):
+              # Create a CloudWatch Event rule to trigger deletion
+              cloudwatch = boto3.client('events')
+              rule_name = f"DeleteObjectRule_{key.replace('/', '_')}"
+              
+              current_time = datetime.utcnow()
+              start_time = current_time + timedelta(minutes=10)
+              start_time_str = start_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+              cloudwatch.put_rule(
+                  Name=rule_name,
+                  ScheduleExpression=f'cron({start_time.minute} {start_time.hour} {start_time.day} {start_time.month} ? {start_time.year})',
+                  State='ENABLED'
+              )
+              
+              cloudwatch.put_targets(
+                  Rule=rule_name,
+                  Targets=[
+                      {
+                          'Id': '1',
+                          'Arn': os.environ['LAMBDA_ARN'],
+                          'Input': json.dumps({
+                              'Bucket': bucket,
+                              'Key': key,
+                              'DeleteTime': delete_time.isoformat()
+                          })
+                      }
+                  ]
+              )
+
+  LambdaObjDelete:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.handler
+      MemorySize: 384
+      Role: !GetAtt LambdaObjDeleteExecRole.Arn
+      Runtime: 'python3.9'
+      Timeout: 5
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref DynamoDBForObj
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          dynamodb = boto3.resource('dynamodb')
+          s3 = boto3.client('s3')
+          table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
+
+          def handler(event, context):
+              bucket = event['Bucket']
+              key = event['Key']
+              s3.delete_object(Bucket=bucket, Key=key)
+              print(f"Deleted {key} from {bucket}")
+              
+              # Clean up the CloudWatch Event rule
+              cloudwatch = boto3.client('events')
+              rule_name = f"DeleteObjectRule_{key.replace('/', '_')}"
+              cloudwatch.remove_targets(Rule=rule_name, Ids=['1'])
+              cloudwatch.delete_rule(Name=rule_name)
+
+              # Clean up DynamoDB item
+              response = table.delete_item(Key={'ObjectKey': key})
+
+  ######################################################################
+  #
+  # CloudFront distribution for the global project
+  #
+  ######################################################################
+  CloudFrontDistrib:
+    Type: "AWS::CloudFront::Distribution"
+    Properties:
+      DistributionConfig:
+        Origins:
+          -
+            DomainName: !Sub "${URLShortenerAPI}.execute-api.${AWS::Region}.amazonaws.com"
+            Id: OriginAPIGW
+            OriginPath: "/prod"
+            CustomOriginConfig:
+              OriginProtocolPolicy: "match-viewer"
+              OriginSSLProtocols: [ "TLSv1.2" ]
+        Comment: CloudFront distribution used as a front end to the server-less URL Shortener
+        Enabled: true
+        DefaultCacheBehavior:
+          CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+          ForwardedValues:
+            QueryString: false
+          TargetOriginId: "OriginAPIGW"
+          ViewerProtocolPolicy: "redirect-to-https"
+
+        CacheBehaviors:
+          -
+            PathPattern: "/admin_*"
+            TargetOriginId: "OriginAPIGW"
+            AllowedMethods: [ DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT ]
+            ForwardedValues:
+              Headers: [ Authorization ]
+              QueryString: false
+            ViewerProtocolPolicy: "https-only"
+          -
+            PathPattern: "/"
+            TargetOriginId: "OriginAPIGW"
+            AllowedMethods: [ HEAD, GET ]
+            DefaultTTL: 0
+            MaxTTL: 0
+            ForwardedValues:
+              Headers: [ Authorization ]
+              QueryString: false
+            ViewerProtocolPolicy: "redirect-to-https"
+        CustomErrorResponses:
+             - ErrorCachingMinTTL: 10
+               ErrorCode: 403
+               ResponseCode: 200
+               ResponsePagePath: "/error-page"
+
+  # Invoke permission for Lambda
+  LambdaShortenerInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt LambdaShortener.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${URLShortenerAPI}/*/POST/admin_shrink_url"
+  LambdaRedirectorInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt LambdaRedirector.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${URLShortenerAPI}/*/GET/*"
+  LambdaObjDeleteInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt LambdaObjDelete.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/DeleteObjectRule_*"
+  ######################################################################
+  #
+  # API Gateway definition for the Lambda functions
+  #
+  ######################################################################
+  URLShortenerAPI:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Description: Rest API for URL Shortener
+      Name: !Ref LambdaShortener
+      FailOnWarnings: true
+      Body:
+        swagger: "2.0"
+        info:
+          title: "URLShortener"
+        schemes: [ https ]
+        paths:
+          /admin:
+            get:
+              consumes: [ "application/json" ]
+              produces: [ "application/json" ]
+              responses:
+                "200":
+                  description: "200 response"
+                  headers:
+                    Content-Type:
+                      type: "string"
+              x-amazon-apigateway-integration:
+                passthroughBehavior: "when_no_match"
+                requestTemplates:
+                  application/json: "{\"statusCode\": 200}"
+                type: "mock"
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Content-Type: "'text/html'"
+                    responseTemplates:
+                      application/json:  |
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="utf-8">
+                            <title>Private URL shortener</title>
+                            <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.0.3/css/bootstrap.min.css">
+                            <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.4/jquery.min.js"></script>
+                            <script type="text/javascript">
+
+                            $(document).ready(function() {
+                                $.ajaxSetup({
+                                    beforeSend: function(xhr) {
+                                        if (xhr.overrideMimeType) {
+                                            xhr.overrideMimeType("application/json");
+                                        }
+                                    }
+                                });
+                                $('#url_input').focus(); // set initial focus
+                                $('form#submit').submit(function(event) {
+                                    $('#url_input_submit').prop('disabled', true);
+                                    // process the form
+                                    var requestData = {
+                                        'url_long': $('#url_input').val(),
+                                        'cdn_prefix': window.location.hostname
+                                    };
+                                    var customUrl = $('#custom_url_input').val();
+                                    if (customUrl) {
+                                        requestData.custom_url = customUrl;
+                                    }
+                                    $.ajax({
+                                        type        : 'POST',
+                                        url         : '/admin_shrink_url',
+                                        data        : JSON.stringify(requestData),
+                                        contentType : 'application/json; charset=utf-8',
+                                        dataType    : 'json',
+                                        encode      : true
+                                    })
+                                    .done(function(data, textStatus, jqXHR) {
+                                        $('#url_input_submit').prop('disabled', false);
+                                        if (data.error) {
+                                            $('#url-group').addClass('has-error'); // add the error class to show red input
+                                            $('#url-error').show().text(data.error); // add the actual error message under our input
+                                        } else {
+                                            $('form#submit').hide(); // hide initial submit form
+                                            $('form#result').show(); // and show the one used to display the results
+                                            $('#url_long').text(data.url_long);
+                                            $('#url_short').val(data.url_short).focus().select();
+                                        }
+                                    })
+                                    .fail(function(_, _, errorThrown) {
+                                        $('#url_input_submit').prop('disabled', false);
+                                        $('#url-group').addClass('has-error'); // add the error class to show red input
+                                        $('#url-error').show().text("Server error: " + errorThrown); // add the actual error message under our input
+                                    });
+                                    // stop the form from submitting the normal way and refreshing the page
+                                    event.preventDefault();
+                                });
+                                $('form#result').submit(function(event) {
+                                    location.reload();
+                                });
+                            });
+
+
+                            </script>
+                        </head>
+                        <body>
+                        <div class="col-sm-8 col-sm-offset-1">
+
+                            <h1>Private URL shortener</h1>
+                            <br/>
+                            <form id="submit">
+                                <div id="url-group" class="form-group">
+                                    <input type="url" required class="form-control" name="url" placeholder="Paste the long URL here" id="url_input">
+                                    <div class="help-block" style="display: none" id="url-error"></div>
+                                </div>
+                                <div id="custom-url-group" class="form-group">
+                                    <input type="text" class="form-control" name="custom_url" placeholder="[OPTIONAL] Enter a 5-character (a-z, 0-9) short URL suffix e.g. (ab123)" id="custom_url_input" pattern="[A-Za-z0-9]{5}">
+                                    <div class="help-block" style="display: none" id="custom-url-error"></div>
+                                </div>
+                                <button type="submit" class="btn btn-success" id="url_input_submit">Shorten</button>
+                            </form>
+                            
+                            
+                            <form id="result" style="display: none">
+                                <div class="alert alert-success">Successfully shortened: <br/><span id="url_long"></span></div>
+                                <div class="form-group">
+                                    <label for="name">You can now copy/paste the short URL</label>
+                                    <input type="text" class="form-control" name="url" readonly="readonly" id="url_short">
+                                </div><button type="submit" class="btn btn-success" id="page_reload">New URL</button><div>
+                                </div>
+                            </form>
+
+                        </div>
+                        </body>
+                        </html>
+          /error-page:
+            get:
+              consumes: [ "application/json" ]
+              produces: [ "application/json" ]
+              responses:
+                "200":
+                  description: "200 response"
+                  headers:
+                    Content-Type:
+                      type: "string"
+              x-amazon-apigateway-integration:
+                passthroughBehavior: "when_no_match"
+                requestTemplates:
+                  application/json: "{\"statusCode\": 200}"
+                type: "mock"
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Content-Type: "'text/html'"
+                    responseTemplates:
+                      application/json:  |
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="UTF-8">
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                            <title>URL Not Found</title>
+                            <style>
+                                body {
+                                    font-family: Arial, sans-serif;
+                                    text-align: center;
+                                    padding: 50px;
+                                    background-color: #f8f8f8;
+                                }
+                                h1 {
+                                    font-size: 50px;
+                                    color: #333;
+                                }
+                                p {
+                                    font-size: 20px;
+                                    color: #666;
+                                }
+                                a {
+                                    color: #007BFF;
+                                    text-decoration: none;
+                                }
+                                a:hover {
+                                    text-decoration: underline;
+                                }
+                            </style>
+                        </head>
+                        <body>
+                            <h1>Oops!</h1>
+                            <p>The URL you are looking for does not exist.</p>
+                        </body>
+                        </html>
+
+          /admin_shrink_url:
+            post:
+              produces: [ "application/json" ]
+              responses:
+                "200":
+                  description: "200 response"
+              x-amazon-apigateway-integration:
+                responses:
+                  default:
+                    statusCode: "200"
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaShortener.Arn}/invocations"
+                passthroughBehavior: "when_no_match"
+                httpMethod: "POST"
+                type: "aws"
+          /{key}:
+            get:
+              consumes: [ "application/json" ]
+              parameters:
+              - name: "key"
+                in: "path"
+                required: true
+                type: "string"
+              responses:
+                "302":
+                  description: "302 response"
+                  headers:
+                    Location:
+                      type: "string"
+                "403":
+                  description: "403 response"
+              x-amazon-apigateway-integration:
+                responses:
+                  default:
+                    statusCode: "302"
+                    responseParameters:
+                      method.response.header.Location: "integration.response.body.Redirect"
+                  "An error occurred.*":
+                    statusCode: "403"
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaRedirector.Arn}/invocations"
+                requestTemplates:
+                  application/json: "{ \"Key\": \"$input.params('key')\" }"
+                passthroughBehavior: "never"
+                httpMethod: "POST"
+                contentHandling: "CONVERT_TO_TEXT"
+                type: "aws"
+
+  URLShortenerAPIDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      RestApiId: !Ref URLShortenerAPI
+  URLShortenerAPIStage:
+    Type: "AWS::ApiGateway::Stage"
+    Properties:
+      StageName: "prod"
+      Description: "Prod stage"
+      RestApiId: !Ref URLShortenerAPI
+      DeploymentId: !Ref URLShortenerAPIDeployment
