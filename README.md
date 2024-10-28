@@ -92,7 +92,7 @@ Afer setting the proper permissions, we proceed to create `deploy.yaml` with con
 
 When the workflow is triggered, it will deploy to AWS by making a change set. The workflow will then continue to run until the stack is deployed successfuly or failed.
 
-### Deplyoment
+### Step 3. Deplyoment
 By triggering the GitHub workflow (either manually or automatically by pushing the `main`), URL Shortener will then be automactically deployed in the ap-east-1 (Hong Kong) region of AWS after a couple of minutes. After it is deployed, we can go to the URL Shortener portal by clicking the `ConnectUrl` in the CloudFormation output on AWS.
 
 
@@ -123,7 +123,7 @@ This group contains rules that allow you to block requests from services that al
 
 ![additional security measures](/WAF%20deployment/Additional%20Security%20Measure.png)
 
-### Usage
+### Step 4. Usage
 To use the portal, simply go the admin page and type the orginal URL in the provided field. User may also provide their own suffix of 5 characters (a-z, 0-9). If suffix provided, one will be generated randomly and the short URL will be returned. Then the user may use the generated short URL and URL Shortener will redirect the user to the original long URL. 
 
 Should the user provided a suffix that already in use, the portal will prompt the user to provide another suffix.
