@@ -11,10 +11,13 @@
   - [Limitations](#limitations)
   - [Potential Improvements](#potential-improvements)
 
-## Description
-The URL Shortener provides all the features and satisfied all requirements from Functional requirements, Infrastructure requirements and Optional Enhancements (Bonus). URLs are auto-generated, and expire after 10 minutes upon access. Documentation for Optional Enhancements (Bonus) are also included in this README.
+The URL Shortener provides shorten URLs auto-generated, and expire after 10 minutes upon access.
 
 URL Shortener Web Interface: https://d1y7ljm6v4i0aq.cloudfront.net/admin
+
+## Description
+In cases where some large  documents need be shared to client with URLs, these URLs are often lengthy, and use of free online URL shortener services like Bitly.com are prohibited due to confidentiality of documents. As such, I have designed a URL shortener with AWS to solve this problem for myself and team.
+
 
 ## Architecture Diagram
 The URL shortener adopted serverless architecture to create a scalable and efficient application, allowing the client to manage as little infrastructure as possible, while leveraging managed AWS services like AWS Lambda, AWS API Gateway, S3, DynamoDB, and CloudFront. The architecture also features a CI/CD pipeline from GitHub to AWS by utilizing GitHub actions.
