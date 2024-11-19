@@ -134,13 +134,13 @@ Should the user provided a suffix that already in use, the portal will prompt th
 The generated short URL link will be expired if it has not been accessed for 10 min.
 ## Cost
 Assumptions:
-1000 short urls created per month, each viewed by 1000 users. So 1000x1000 = 1,000,000 requests/month.
+100 short urls created per month, each viewed by 100 users. So 100x100 = 10,000 requests/month.
 
-Monthy cost: 25.31 USD  
-Yearly cost: 301.56 USD  
+Monthy cost: 0.95 USD  (without WAF)
+Yearly cost: 11.4 USD  
 No upfront cost.
 
-Detailed estimation link: https://calculator.aws/#/estimate?id=8b8acbf2bd7507af72718e6150efa700fa2e8c9b
+Detailed estimation link: https://calculator.aws/#/estimate?id=0c0cd81bd97e9e112e7ddee985b873c0c34e0ef5
 
 ## Limitations
 ### Limitations on concurrent users
