@@ -420,7 +420,7 @@ Resources:
             QueryString: false
           TargetOriginId: "OriginAPIGW"
           ViewerProtocolPolicy: "redirect-to-https"
-
+        DefaultRootObject: "admin"
         CacheBehaviors:
           -
             PathPattern: "/admin_*"
