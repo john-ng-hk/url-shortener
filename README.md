@@ -13,7 +13,7 @@
 
 The URL Shortener provides shorten URLs auto-generated, and expire after 10 minutes upon access.
 
-URL Shortener Web Interface: https://d1y7ljm6v4i0aq.cloudfront.net/admin
+URL Shortener Web Interface: https://url.cmpapp.top
 
 ## Description
 In cases where some large  documents need be shared to client with URLs, these URLs are often lengthy, and use of free online URL shortener services like Bitly.com are prohibited due to confidentiality of documents. As such, I have designed a URL shortener with AWS to solve this problem for myself and team.
