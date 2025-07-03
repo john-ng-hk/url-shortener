@@ -71,7 +71,7 @@ Resources:
       Handler: index.handler
       MemorySize: 384
       Role: !GetAtt LambdaExecRole.Arn
-      Runtime: python3.9
+      Runtime: python3.13
       Timeout: 10
       Environment:
         Variables:
@@ -168,7 +168,7 @@ Resources:
       Handler: index.handler
       MemorySize: 384
       Role: !GetAtt LambdaExecRole.Arn
-      Runtime: python3.9
+      Runtime: python3.13
       Timeout: 5
       Environment:
         Variables:
@@ -297,7 +297,7 @@ Resources:
       Handler: index.handler
       MemorySize: 384
       Role: !GetAtt LambdaObjDeleteExecRole.Arn
-      Runtime: 'python3.9'
+      Runtime: 'python3.13'
       Timeout: 5
       Environment:
         Variables:
@@ -366,7 +366,7 @@ Resources:
       Handler: index.handler
       MemorySize: 384
       Role: !GetAtt LambdaObjDeleteExecRole.Arn
-      Runtime: 'python3.9'
+      Runtime: 'python3.13'
       Timeout: 5
       Environment:
         Variables:
